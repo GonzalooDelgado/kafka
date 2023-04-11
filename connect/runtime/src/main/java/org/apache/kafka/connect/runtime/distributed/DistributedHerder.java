@@ -911,6 +911,70 @@ public class DistributedHerder extends AbstractHerder implements Runnable {
     }
 
     @Override
+    public void stopConnector(final String connName, final Callback<Void> callback) {
+        log.trace("Submitting request to transition connector {} to STOPPED state", connName);
+
+        addRequest(
+                () -> {
+                    if (!configState.contains(connName))
+                        throw new NotFoundException("Unknown connector " + connName);
+
+                    // We only allow the leader to handle this request since it involves writing task configs to the config topic
+                    if (!isLeader()) {
+                        callback.onCompletion(new NotLeaderException("Only the leader can transition connectors to the STOPPED state.", leaderUrl()), null);
+                        return null;
+                    }
+
+                    // We write the task configs first since, if we fail between then and writing the target state, the
+                    // cluster is still kept in a healthy state. A RUNNING connector with zero tasks is acceptable (although,
+                    // if the connector is reassigned during the ensuing rebalance, it is likely that it will immediately generate
+                    // a non-empty set of task configs). A STOPPED connector with a non-empty set of tasks is less acceptable
+                    // and likely to confuse users.
+                    writeTaskConfigs(connName, Collections.emptyList());
+                    configBackingStore.putTargetState(connName, TargetState.STOPPED);
+                    // Force a read of the new target state for the connector
+                    refreshConfigSnapshot(workerSyncTimeoutMs);
+
+                    callback.onCompletion(null, null);
+                    return null;
+                },
+                forwardErrorCallback(callback)
+        );
+    }
+
+    @Override
+    public void stopConnector(final String connName, final Callback<Void> callback) {
+        log.trace("Submitting request to transition connector {} to STOPPED state", connName);
+
+        addRequest(
+                () -> {
+                    if (!configState.contains(connName))
+                        throw new NotFoundException("Unknown connector " + connName);
+
+                    // We only allow the leader to handle this request since it involves writing task configs to the config topic
+                    if (!isLeader()) {
+                        callback.onCompletion(new NotLeaderException("Only the leader can transition connectors to the STOPPED state.", leaderUrl()), null);
+                        return null;
+                    }
+
+                    // We write the task configs first since, if we fail between then and writing the target state, the
+                    // cluster is still kept in a healthy state. A RUNNING connector with zero tasks is acceptable (although,
+                    // if the connector is reassigned during the ensuing rebalance, it is likely that it will immediately generate
+                    // a non-empty set of task configs). A STOPPED connector with a non-empty set of tasks is less acceptable
+                    // and likely to confuse users.
+                    writeTaskConfigs(connName, Collections.emptyList());
+                    configBackingStore.putTargetState(connName, TargetState.STOPPED);
+                    // Force a read of the new target state for the connector
+                    refreshConfigSnapshot(workerSyncTimeoutMs);
+
+                    callback.onCompletion(null, null);
+                    return null;
+                },
+                forwardErrorCallback(callback)
+        );
+    }
+
+    @Override
     public void requestTaskReconfiguration(final String connName) {
         log.trace("Submitting connector task reconfiguration request {}", connName);
 
@@ -1552,6 +1616,9 @@ public class DistributedHerder extends AbstractHerder implements Runnable {
             if (!worker.isRunning(connName)) {
                 log.info("Skipping reconfiguration of connector {} since it is not running", connName);
                 return;
+            } else if (configState.targetState(connName) != TargetState.STARTED) {
+                log.info("Skipping reconfiguration of connector {} since its target state is {}", connName, configState.targetState(connName));
+                return;
             }
 
             Map<String, String> configs = configState.connectorConfig(connName);
@@ -1616,6 +1683,48 @@ public class DistributedHerder extends AbstractHerder implements Runnable {
         } catch (Throwable t) {
             cb.onCompletion(t, null);
         }
+    }
+
+    // Invoked by exactly-once worker source tasks after they have successfully initialized their transactional
+    // producer to ensure that it is still safe to bring up the task
+    private void verifyTaskGenerationAndOwnership(ConnectorTaskId id, int initialTaskGen) {
+        log.debug("Reading to end of config topic to ensure it is still safe to bring up source task {} with exactly-once support", id);
+        if (!refreshConfigSnapshot(Long.MAX_VALUE)) {
+            throw new ConnectException("Failed to read to end of config topic");
+        }
+
+        FutureCallback<Void> verifyCallback = new FutureCallback<>();
+
+        addRequest(
+            () -> verifyTaskGenerationAndOwnership(id, initialTaskGen, verifyCallback),
+            forwardErrorCallback(verifyCallback)
+        );
+
+        try {
+            verifyCallback.get();
+        } catch (InterruptedException e) {
+            throw new ConnectException("Interrupted while performing preflight check for task " + id, e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            throw ConnectUtils.maybeWrap(cause, "Failed to perform preflight check for task " + id);
+        }
+    }
+
+    // Visible for testing
+    Void verifyTaskGenerationAndOwnership(ConnectorTaskId id, int initialTaskGen, Callback<Void> callback) {
+        Integer currentTaskGen = configState.taskConfigGeneration(id.connector());
+        if (!Objects.equals(initialTaskGen, currentTaskGen)) {
+            throw new ConnectException("Cannot start source task "
+                + id + " with exactly-once support as the connector has already generated a new set of task configs");
+        }
+
+        if (!assignment.tasks().contains(id)) {
+            throw new ConnectException("Cannot start source task "
+                + id + " as it has already been revoked from this worker");
+        }
+
+        callback.onCompletion(null, null);
+        return null;
     }
 
     private boolean checkRebalanceNeeded(Callback<?> callback) {

@@ -462,9 +462,11 @@ public class KafkaConfigBackingStore implements ConfigBackingStore {
 
     @Override
     public void putTargetState(String connector, TargetState state) {
-        Struct connectTargetState = new Struct(TARGET_STATE_V0);
-        connectTargetState.put("state", state.name());
-        byte[] serializedTargetState = converter.fromConnectData(topic, TARGET_STATE_V0, connectTargetState);
+        Struct connectTargetState = new Struct(TARGET_STATE_V1);
+        // Older workers don't support the STOPPED state; fall back on PAUSED
+        connectTargetState.put("state", state == STOPPED ? PAUSED.name() : state.name());
+        connectTargetState.put("state.v2", state.name());
+        byte[] serializedTargetState = converter.fromConnectData(topic, TARGET_STATE_V1, connectTargetState);
         log.debug("Writing target state {} for connector {}", state, connector);
         configLog.send(TARGET_STATE_KEY(connector), serializedTargetState);
     }

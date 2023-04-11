@@ -107,7 +107,7 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertFailedMetric(workerConnector);
         workerConnector.shutdown();
         workerConnector.doShutdown();
-        assertStoppedMetric(workerConnector);
+        assertDestroyedMetric(workerConnector);
 
         verifyAll();
     }
@@ -148,7 +148,7 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertFailedMetric(workerConnector);
         workerConnector.shutdown();
         workerConnector.doShutdown();
-        assertStoppedMetric(workerConnector);
+        assertDestroyedMetric(workerConnector);
 
         verifyAll();
     }
@@ -191,7 +191,7 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertRunningMetric(workerConnector);
         workerConnector.shutdown();
         workerConnector.doShutdown();
-        assertStoppedMetric(workerConnector);
+        assertDestroyedMetric(workerConnector);
 
         verifyAll();
     }
@@ -241,9 +241,68 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertPausedMetric(workerConnector);
         workerConnector.shutdown();
         workerConnector.doShutdown();
-        assertStoppedMetric(workerConnector);
+        assertDestroyedMetric(workerConnector);
 
         verifyAll();
+    }
+
+    @Test
+    public void testStartupAndStop() {
+        connector = sinkConnector;
+        connector.version();
+        expectLastCall().andReturn(VERSION);
+
+        connector.initialize(EasyMock.notNull(SinkConnectorContext.class));
+        expectLastCall();
+
+        connector.start(CONFIG);
+        expectLastCall();
+
+        listener.onStartup(CONNECTOR);
+        expectLastCall();
+
+        connector.stop();
+        expectLastCall();
+
+        listener.onPause(CONNECTOR);
+        expectLastCall();
+
+        listener.onShutdown(CONNECTOR);
+        expectLastCall();
+
+        ctx.close();
+        expectLastCall();
+
+        Callback<TargetState> onStateChange = createStrictMock(Callback.class);
+        onStateChange.onCompletion(EasyMock.isNull(), EasyMock.eq(TargetState.STARTED));
+        expectLastCall();
+        onStateChange.onCompletion(EasyMock.isNull(), EasyMock.eq(TargetState.PAUSED));
+        expectLastCall();
+
+        replayAll();
+
+        WorkerConnector workerConnector = new WorkerConnector(CONNECTOR, connector, connectorConfig, ctx, metrics, listener, offsetStorageReader, classLoader);
+
+        workerConnector.initialize();
+        assertInitializedSinkMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STARTED, onStateChange);
+        assertRunningMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STOPPED, onStateChange);
+        assertStoppedMetric(workerConnector);
+        workerConnector.shutdown();
+        workerConnector.doShutdown();
+        assertDestroyedMetric(workerConnector);
+
+        verifyInitialize();
+        verify(connector).start(CONFIG);
+        verify(listener).onStartup(CONNECTOR);
+        verify(listener).onStop(CONNECTOR);
+        verifyCleanShutdown(true);
+
+        InOrder inOrder = inOrder(onStateChange);
+        inOrder.verify(onStateChange).onCompletion(isNull(), eq(TargetState.STARTED));
+        inOrder.verify(onStateChange).onCompletion(isNull(), eq(TargetState.STOPPED));
+        verifyNoMoreInteractions(onStateChange);
     }
 
     @Test
@@ -291,7 +350,7 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertRunningMetric(workerConnector);
         workerConnector.shutdown();
         workerConnector.doShutdown();
-        assertStoppedMetric(workerConnector);
+        assertDestroyedMetric(workerConnector);
 
         verifyAll();
     }
@@ -330,9 +389,54 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertPausedMetric(workerConnector);
         workerConnector.shutdown();
         workerConnector.doShutdown();
-        assertStoppedMetric(workerConnector);
+        assertDestroyedMetric(workerConnector);
 
         verifyAll();
+    }
+
+    @Test
+    public void testStartupStopped() {
+        connector = sinkConnector;
+        connector.version();
+        expectLastCall().andReturn(VERSION);
+
+        connector.initialize(EasyMock.notNull(SinkConnectorContext.class));
+        expectLastCall();
+
+        // connector never gets started
+
+        listener.onPause(CONNECTOR);
+        expectLastCall();
+
+        listener.onShutdown(CONNECTOR);
+        expectLastCall();
+
+        ctx.close();
+        expectLastCall();
+
+        Callback<TargetState> onStateChange = createStrictMock(Callback.class);
+        onStateChange.onCompletion(EasyMock.isNull(), EasyMock.eq(TargetState.PAUSED));
+        expectLastCall();
+
+        replayAll();
+
+        WorkerConnector workerConnector = new WorkerConnector(CONNECTOR, connector, connectorConfig, ctx, metrics, listener, offsetStorageReader, classLoader);
+
+        workerConnector.initialize();
+        assertInitializedSinkMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STOPPED, onStateChange);
+        assertStoppedMetric(workerConnector);
+        workerConnector.shutdown();
+        workerConnector.doShutdown();
+        assertDestroyedMetric(workerConnector);
+
+        verifyInitialize();
+        // connector never gets started
+        verify(listener).onStop(CONNECTOR);
+        verifyCleanShutdown(false);
+
+        verify(onStateChange).onCompletion(isNull(), eq(TargetState.STOPPED));
+        verifyNoMoreInteractions(onStateChange);
     }
 
     @Test
@@ -372,9 +476,52 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertFailedMetric(workerConnector);
         workerConnector.shutdown();
         workerConnector.doShutdown();
-        assertStoppedMetric(workerConnector);
+        assertDestroyedMetric(workerConnector);
 
         verifyAll();
+    }
+
+    @Test
+    public void testStopFailure() {
+        RuntimeException exception = new RuntimeException();
+        connector = sourceConnector;
+
+        when(connector.version()).thenReturn(VERSION);
+
+        // Fail during the first call to stop, then succeed for the next attempt
+        doThrow(exception).doNothing().when(connector).stop();
+
+        Callback<TargetState> onFirstStateChange = mockCallback();
+        Callback<TargetState> onSecondStateChange = mockCallback();
+        Callback<TargetState> onThirdStateChange = mockCallback();
+        WorkerConnector workerConnector = new WorkerConnector(CONNECTOR, connector, connectorConfig, ctx, metrics, listener, offsetStorageReader, offsetStore, classLoader);
+
+        workerConnector.initialize();
+        assertInitializedSourceMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STARTED, onFirstStateChange);
+        assertRunningMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STOPPED, onSecondStateChange);
+        assertStoppedMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STARTED, onThirdStateChange);
+        assertRunningMetric(workerConnector);
+        workerConnector.shutdown();
+        workerConnector.doShutdown();
+        assertDestroyedMetric(workerConnector);
+
+        verifyInitialize();
+        verify(connector, times(2)).start(CONFIG);
+        verify(listener).onStartup(CONNECTOR);
+        verify(listener).onResume(CONNECTOR);
+        verify(listener).onStop(CONNECTOR);
+        verify(onFirstStateChange).onCompletion(isNull(), eq(TargetState.STARTED));
+        verifyNoMoreInteractions(onFirstStateChange);
+        // We swallow failures when transitioning to the STOPPED state
+        verify(onSecondStateChange).onCompletion(isNull(), eq(TargetState.STOPPED));
+        verifyNoMoreInteractions(onSecondStateChange);
+        verify(onThirdStateChange).onCompletion(isNull(), eq(TargetState.STARTED));
+        verifyNoMoreInteractions(onThirdStateChange);
+        verifyShutdown(2, true, true);
+        verifyNoMoreInteractions(listener);
     }
 
     @Test
@@ -463,7 +610,7 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertRunningMetric(workerConnector);
         workerConnector.shutdown();
         workerConnector.doShutdown();
-        assertStoppedMetric(workerConnector);
+        assertDestroyedMetric(workerConnector);
 
         verifyAll();
     }
@@ -515,9 +662,73 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertPausedMetric(workerConnector);
         workerConnector.shutdown();
         workerConnector.doShutdown();
-        assertStoppedMetric(workerConnector);
+        assertDestroyedMetric(workerConnector);
 
         verifyAll();
+    }
+
+    @Test
+    public void testTransitionStoppedToStopped() {
+        connector = sourceConnector;
+        when(connector.version()).thenReturn(VERSION);
+
+        Callback<TargetState> onStateChange = mockCallback();
+        WorkerConnector workerConnector = new WorkerConnector(CONNECTOR, connector, connectorConfig, ctx, metrics, listener, offsetStorageReader, offsetStore, classLoader);
+
+        workerConnector.initialize();
+        assertInitializedSourceMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STARTED, onStateChange);
+        assertRunningMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STOPPED, onStateChange);
+        assertStoppedMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STOPPED, onStateChange);
+        assertStoppedMetric(workerConnector);
+        workerConnector.shutdown();
+        workerConnector.doShutdown();
+        assertDestroyedMetric(workerConnector);
+
+        verifyInitialize();
+        verify(connector).start(CONFIG);
+        verify(listener).onStartup(CONNECTOR);
+        verify(listener).onStop(CONNECTOR);
+        verifyCleanShutdown(true);
+
+        InOrder inOrder = inOrder(onStateChange);
+        inOrder.verify(onStateChange).onCompletion(isNull(), eq(TargetState.STARTED));
+        inOrder.verify(onStateChange, times(2)).onCompletion(isNull(), eq(TargetState.STOPPED));
+        verifyNoMoreInteractions(onStateChange);
+    }
+
+    @Test
+    public void testTransitionStoppedToStopped() {
+        connector = sourceConnector;
+        when(connector.version()).thenReturn(VERSION);
+
+        Callback<TargetState> onStateChange = mockCallback();
+        WorkerConnector workerConnector = new WorkerConnector(CONNECTOR, connector, connectorConfig, ctx, metrics, listener, offsetStorageReader, offsetStore, classLoader);
+
+        workerConnector.initialize();
+        assertInitializedSourceMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STARTED, onStateChange);
+        assertRunningMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STOPPED, onStateChange);
+        assertStoppedMetric(workerConnector);
+        workerConnector.doTransitionTo(TargetState.STOPPED, onStateChange);
+        assertStoppedMetric(workerConnector);
+        workerConnector.shutdown();
+        workerConnector.doShutdown();
+        assertDestroyedMetric(workerConnector);
+
+        verifyInitialize();
+        verify(connector).start(CONFIG);
+        verify(listener).onStartup(CONNECTOR);
+        verify(listener).onStop(CONNECTOR);
+        verifyCleanShutdown(true);
+
+        InOrder inOrder = inOrder(onStateChange);
+        inOrder.verify(onStateChange).onCompletion(isNull(), eq(TargetState.STARTED));
+        inOrder.verify(onStateChange, times(2)).onCompletion(isNull(), eq(TargetState.STOPPED));
+        verifyNoMoreInteractions(onStateChange);
     }
 
     @Test
@@ -544,13 +755,23 @@ public class WorkerConnectorTest extends EasyMockSupport {
     protected void assertFailedMetric(WorkerConnector workerConnector) {
         assertFalse(workerConnector.metrics().isUnassigned());
         assertTrue(workerConnector.metrics().isFailed());
+        assertFalse(workerConnector.metrics().isStopped());
         assertFalse(workerConnector.metrics().isPaused());
+        assertFalse(workerConnector.metrics().isRunning());
+    }
+
+    protected void assertStoppedMetric(WorkerConnector workerConnector) {
+        assertFalse(workerConnector.metrics().isUnassigned());
+        assertFalse(workerConnector.metrics().isFailed());
+        assertFalse(workerConnector.metrics().isPaused());
+        assertTrue(workerConnector.metrics().isStopped());
         assertFalse(workerConnector.metrics().isRunning());
     }
 
     protected void assertPausedMetric(WorkerConnector workerConnector) {
         assertFalse(workerConnector.metrics().isUnassigned());
         assertFalse(workerConnector.metrics().isFailed());
+        assertFalse(workerConnector.metrics().isStopped());
         assertTrue(workerConnector.metrics().isPaused());
         assertFalse(workerConnector.metrics().isRunning());
     }
@@ -558,13 +779,15 @@ public class WorkerConnectorTest extends EasyMockSupport {
     protected void assertRunningMetric(WorkerConnector workerConnector) {
         assertFalse(workerConnector.metrics().isUnassigned());
         assertFalse(workerConnector.metrics().isFailed());
+        assertFalse(workerConnector.metrics().isStopped());
         assertFalse(workerConnector.metrics().isPaused());
         assertTrue(workerConnector.metrics().isRunning());
     }
 
-    protected void assertStoppedMetric(WorkerConnector workerConnector) {
+    protected void assertDestroyedMetric(WorkerConnector workerConnector) {
         assertTrue(workerConnector.metrics().isUnassigned());
         assertFalse(workerConnector.metrics().isFailed());
+        assertFalse(workerConnector.metrics().isStopped());
         assertFalse(workerConnector.metrics().isPaused());
         assertFalse(workerConnector.metrics().isRunning());
     }
@@ -580,6 +803,7 @@ public class WorkerConnectorTest extends EasyMockSupport {
     protected void assertInitializedMetric(WorkerConnector workerConnector, String expectedType) {
         assertTrue(workerConnector.metrics().isUnassigned());
         assertFalse(workerConnector.metrics().isFailed());
+        assertFalse(workerConnector.metrics().isStopped());
         assertFalse(workerConnector.metrics().isPaused());
         assertFalse(workerConnector.metrics().isRunning());
         MetricGroup metricGroup = workerConnector.metrics().metricGroup();
@@ -590,6 +814,43 @@ public class WorkerConnectorTest extends EasyMockSupport {
         assertEquals(expectedType, type);
         assertNotNull(clazz);
         assertEquals(VERSION, version);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Callback<TargetState> mockCallback() {
+        return mock(Callback.class);
+    }
+
+    private void verifyInitialize() {
+        verify(connector).version();
+        if (connector instanceof SourceConnector) {
+            verify(offsetStore).start();
+            verify(connector).initialize(any(SourceConnectorContext.class));
+        } else {
+            verify(connector).initialize(any(SinkConnectorContext.class));
+        }
+    }
+
+    private void verifyCleanShutdown(boolean started) {
+        verifyShutdown(true, started);
+    }
+
+    private void verifyShutdown(boolean clean, boolean started) {
+        verifyShutdown(1, clean, started);
+    }
+
+    private void verifyShutdown(int connectorStops, boolean clean, boolean started) {
+        verify(ctx).close();
+        if (connector instanceof SourceConnector) {
+            verify(offsetStorageReader).close();
+            verify(offsetStore).stop();
+        }
+        if (clean) {
+            verify(listener).onShutdown(CONNECTOR);
+        }
+        if (started) {
+            verify(connector, times(connectorStops)).stop();
+        }
     }
 
     private static abstract class TestConnector extends Connector {

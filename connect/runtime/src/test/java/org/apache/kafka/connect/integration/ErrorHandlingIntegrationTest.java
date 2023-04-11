@@ -176,7 +176,7 @@ public class ErrorHandlingIntegrationTest {
         }
 
         connect.deleteConnector(CONNECTOR_NAME);
-        connect.assertions().assertConnectorAndTasksAreStopped(CONNECTOR_NAME,
+        connect.assertions().assertConnectorAndTasksAreNotRunning(CONNECTOR_NAME,
                 "Connector tasks did not stop in time.");
 
     }
@@ -245,7 +245,7 @@ public class ErrorHandlingIntegrationTest {
         ConsumerRecords<byte[], byte[]> messages = connect.kafka().consume(EXPECTED_INCORRECT_RECORDS, CONSUME_MAX_DURATION_MS, DLQ_TOPIC);
 
         connect.deleteConnector(CONNECTOR_NAME);
-        connect.assertions().assertConnectorAndTasksAreStopped(CONNECTOR_NAME,
+        connect.assertions().assertConnectorAndTasksAreNotRunning(CONNECTOR_NAME,
             "Connector tasks did not stop in time.");
     }
 
