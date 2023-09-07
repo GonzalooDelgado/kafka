@@ -277,24 +277,25 @@ public class TopicAdmin implements AutoCloseable {
         this(adminConfig, Admin.create(adminConfig));
     }
 
-    // visible for testing
-    TopicAdmin(Map<String, Object> adminConfig, Admin adminClient) {
-        this(adminConfig, adminClient, true);
+    public TopicAdmin(Map<String, Object> adminConfig, Admin adminClient) {
+        this(bootstrapServers(adminConfig), adminClient, true);
     }
 
     // visible for testing
-    TopicAdmin(Map<String, Object> adminConfig, Admin adminClient, boolean logCreation) {
+    TopicAdmin(Admin adminClient) {
+        this(null, adminClient, true);
+    }
+
+    // visible for testing
+    TopicAdmin(String bootstrapServers, Admin adminClient, boolean logCreation) {
         this.admin = adminClient;
-        this.adminConfig = adminConfig != null ? adminConfig : Collections.emptyMap();
+        this.bootstrapServers = bootstrapServers != null ? bootstrapServers : "<unknown>";
         this.logCreation = logCreation;
     }
 
-    /**
-     * Get the {@link Admin} client used by this topic admin object.
-     * @return the Kafka admin instance; never null
-     */
-    public Admin admin() {
-        return admin;
+    private static String bootstrapServers(Map<String, Object> adminConfig) {
+        Object result = adminConfig.get(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG);
+        return result != null ? result.toString() : null;
     }
 
    /**
@@ -675,24 +676,28 @@ public class TopicAdmin implements AutoCloseable {
                 Throwable cause = e.getCause();
                 String topic = partition.topic();
                 if (cause instanceof AuthorizationException) {
-                    String msg = String.format("Not authorized to get the end offsets for topic '%s' on brokers at %s", topic, bootstrapServers());
-                    throw new ConnectException(msg, e);
+                    String msg = String.format("Not authorized to get the end offsets for topic '%s' on brokers at %s", topic, bootstrapServers);
+                    throw new ConnectException(msg, cause);
                 } else if (cause instanceof UnsupportedVersionException) {
                     // Should theoretically never happen, because this method is the same as what the consumer uses and therefore
                     // should exist in the broker since before the admin client was added
                     String msg = String.format("API to get the get the end offsets for topic '%s' is unsupported on brokers at %s", topic, bootstrapServers());
                     throw new UnsupportedVersionException(msg, e);
+                    String msg = String.format("API to get the get the end offsets for topic '%s' is unsupported on brokers at %s", topic, bootstrapServers);
+                    throw new UnsupportedVersionException(msg, cause);
                 } else if (cause instanceof TimeoutException) {
                     String msg = String.format("Timed out while waiting to get end offsets for topic '%s' on brokers at %s", topic, bootstrapServers());
                     throw new TimeoutException(msg, e);
+                    String msg = String.format("Timed out while waiting to get end offsets for topic '%s' on brokers at %s", topic, bootstrapServers);
+                    throw new TimeoutException(msg, cause);
                 } else if (cause instanceof LeaderNotAvailableException) {
-                    String msg = String.format("Unable to get end offsets during leader election for topic '%s' on brokers at %s", topic, bootstrapServers());
-                    throw new LeaderNotAvailableException(msg, e);
+                    String msg = String.format("Unable to get end offsets during leader election for topic '%s' on brokers at %s", topic, bootstrapServers);
+                    throw new LeaderNotAvailableException(msg, cause);
                 } else if (cause instanceof org.apache.kafka.common.errors.RetriableException) {
                     throw (org.apache.kafka.common.errors.RetriableException) cause;
                 } else {
-                    String msg = String.format("Error while getting end offsets for topic '%s' on brokers at %s", topic, bootstrapServers());
-                    throw new ConnectException(msg, e);
+                    String msg = String.format("Error while getting end offsets for topic '%s' on brokers at %s", topic, bootstrapServers);
+                    throw new ConnectException(msg, cause);
                 }
             } catch (InterruptedException e) {
                 Thread.interrupted();
@@ -703,6 +708,38 @@ public class TopicAdmin implements AutoCloseable {
         return result;
     }
 
+    /**
+     * Fetch the most recent offset for each of the supplied {@link TopicPartition} objects, and performs retry when
+     * {@link org.apache.kafka.connect.errors.RetriableException} is thrown.
+     *
+     * @param partitions        the topic partitions
+     * @param timeoutDuration   timeout duration; may not be null
+     * @param retryBackoffMs    the number of milliseconds to delay upon receiving a
+     *                          {@link org.apache.kafka.connect.errors.RetriableException} before retrying again;
+     *                          must be 0 or more
+     * @return                  the map of offset for each topic partition, or an empty map if the supplied partitions
+     *                          are null or empty
+     * @throws UnsupportedVersionException if the broker is too old to support the admin client API to read end offsets
+     * @throws ConnectException if {@code timeoutDuration} is exhausted
+     * @see TopicAdmin#endOffsets(Set)
+     */
+    public Map<TopicPartition, Long> retryEndOffsets(Set<TopicPartition> partitions, Duration timeoutDuration, long retryBackoffMs) {
+
+        try {
+            return RetryUtil.retryUntilTimeout(
+                    () -> endOffsets(partitions),
+                    () -> "list offsets for topic partitions",
+                    timeoutDuration,
+                    retryBackoffMs);
+        } catch (UnsupportedVersionException e) {
+            // Older brokers don't support this admin method, so rethrow it without wrapping it
+            throw e;
+        } catch (Exception e) {
+            throw ConnectUtils.maybeWrap(e, "Failed to list offsets for topic partitions");
+        }
+    }
+
+>>>>>>> 54ab5b29e4... KAFKA-15416: Fix flaky TopicAdminTest::retryEndOffsetsShouldRetryWhenTopicNotFound test case (#14313)
     @Override
     public void close() {
         admin.close();
