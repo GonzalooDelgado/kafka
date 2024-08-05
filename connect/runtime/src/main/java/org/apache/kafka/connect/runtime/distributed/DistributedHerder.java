@@ -2364,6 +2364,7 @@ public class DistributedHerder extends AbstractHerder implements Runnable {
     }
 
     DistributedHerderRequest addRequest(long delayMs, Callable<Void> action, Callback<Void> callback) {
+        callback.recordStage(tickThreadStage);
         DistributedHerderRequest req = new DistributedHerderRequest(time.milliseconds() + delayMs, requestSeqNum.incrementAndGet(), action, callback);
         requests.add(req);
         // We don't need to synchronize here
@@ -2375,7 +2376,6 @@ public class DistributedHerder extends AbstractHerder implements Runnable {
         // queue was added
         if (peekWithoutException() == req)
             member.wakeup();
-        callback.recordStage(tickThreadStage);
         return req;
     }
 
