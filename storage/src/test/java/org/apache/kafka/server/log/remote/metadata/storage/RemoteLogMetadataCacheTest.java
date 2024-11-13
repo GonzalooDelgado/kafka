@@ -32,6 +32,8 @@ import org.junit.jupiter.api.Test;
 import java.util.Collections;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 public class RemoteLogMetadataCacheTest {
 
     private static final TopicIdPartition TP0 = new TopicIdPartition(Uuid.randomUuid(),
@@ -43,7 +45,7 @@ public class RemoteLogMetadataCacheTest {
     private final Time time = new MockTime(1);
 
     @Test
-    public void testAPIsWithInvalidArgs() {
+    public void testAPIsWithInvalidArgs() throws RemoteResourceNotFoundException {
         RemoteLogMetadataCache cache = new RemoteLogMetadataCache();
 
         Assertions.assertThrows(NullPointerException.class, () -> cache.addCopyInProgressSegment(null));
@@ -70,13 +72,42 @@ public class RemoteLogMetadataCacheTest {
                     time.milliseconds(), RemoteLogSegmentState.DELETE_SEGMENT_STARTED, BROKER_ID_1));
         });
 
-        // Check for invalid state transition.
-        Assertions.assertThrows(IllegalStateException.class, () -> {
-            RemoteLogSegmentMetadata segmentMetadata = createSegmentUpdateWithState(cache, Collections.singletonMap(0, 0L), 0,
-                    100, RemoteLogSegmentState.COPY_SEGMENT_FINISHED);
-            cache.updateRemoteLogSegmentMetadata(new RemoteLogSegmentMetadataUpdate(segmentMetadata.remoteLogSegmentId(),
-                    time.milliseconds(), RemoteLogSegmentState.DELETE_SEGMENT_FINISHED, BROKER_ID_1));
-        });
+        // Invalid state transitions are dropped silently (tested in testDropEventOnInvalidStateTransition).
+        RemoteLogSegmentMetadata segmentMetadata = createSegmentUpdateWithState(cache, Collections.singletonMap(0, 0L), 0,
+                100, RemoteLogSegmentState.COPY_SEGMENT_FINISHED);
+        // This invalid transition should be dropped silently, not throw an exception.
+        cache.updateRemoteLogSegmentMetadata(new RemoteLogSegmentMetadataUpdate(segmentMetadata.remoteLogSegmentId(),
+                time.milliseconds(), RemoteLogSegmentState.DELETE_SEGMENT_FINISHED, BROKER_ID_1));
+    }
+
+    @Test
+    public void testCacheUpdateMetadataOnInvalidArgs() {
+        RemoteLogMetadataCache cache = new RemoteLogMetadataCache();
+        assertThrows(NullPointerException.class, () -> cache.updateRemoteLogSegmentMetadata(null));
+        for (RemoteLogSegmentState state : RemoteLogSegmentState.values()) {
+            if (state != RemoteLogSegmentState.COPY_SEGMENT_STARTED) {
+                RemoteLogSegmentId segmentId = new RemoteLogSegmentId(TP0, Uuid.randomUuid());
+                RemoteLogSegmentMetadataUpdate updatedMetadata = new RemoteLogSegmentMetadataUpdate(
+                        segmentId, time.milliseconds(), state, BROKER_ID_1);
+                assertThrows(RemoteResourceNotFoundException.class, () ->
+                        cache.updateRemoteLogSegmentMetadata(updatedMetadata));
+            }
+        }
+    }
+
+    @Test
+    public void testDropEventOnInvalidStateTransition() throws RemoteResourceNotFoundException {
+        RemoteLogMetadataCache cache = new RemoteLogMetadataCache();
+        int leaderEpoch = 5;
+        long offset = 10L;
+        RemoteLogSegmentId segmentId = new RemoteLogSegmentId(TP0, Uuid.randomUuid());
+        RemoteLogSegmentMetadata segmentMetadata = new RemoteLogSegmentMetadata(segmentId, offset, 100L,
+                -1L, BROKER_ID_0, time.milliseconds(), SEG_SIZE, Collections.singletonMap(leaderEpoch, offset));
+        cache.addCopyInProgressSegment(segmentMetadata);
+
+        RemoteLogSegmentMetadataUpdate segMetadataUpdate = new RemoteLogSegmentMetadataUpdate(segmentId,
+                time.milliseconds(), RemoteLogSegmentState.DELETE_SEGMENT_FINISHED, BROKER_ID_1);
+        cache.updateRemoteLogSegmentMetadata(segMetadataUpdate);
     }
 
     private RemoteLogSegmentMetadata createSegmentUpdateWithState(RemoteLogMetadataCache cache,

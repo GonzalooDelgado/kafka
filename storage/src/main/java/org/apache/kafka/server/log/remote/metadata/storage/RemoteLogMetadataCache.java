@@ -155,8 +155,12 @@ public class RemoteLogMetadataCache {
                                                       remoteLogSegmentId);
         }
 
-        // Check the state transition.
-        checkStateTransition(existingMetadata.state(), targetState);
+        // Check the state transition. Drop invalid transitions silently.
+        if (!RemoteLogSegmentState.isValidTransition(existingMetadata.state(), targetState)) {
+            log.warn("Dropping invalid state transition from {} to {} for segment {}",
+                    existingMetadata.state(), targetState, remoteLogSegmentId);
+            return;
+        }
 
         switch (targetState) {
             case COPY_SEGMENT_STARTED:
