@@ -25,13 +25,15 @@ import kafka.message._
 import kafka.metrics.KafkaYammerMetrics
 import kafka.server.{BrokerTopicStats, RequestLocal}
 import kafka.utils.TestUtils.meterCount
-import org.apache.kafka.common.errors.{InvalidTimestampException, UnsupportedCompressionTypeException, UnsupportedForMessageFormatException}
+import org.apache.kafka.common.errors.{CorruptRecordException, InvalidTimestampException, UnsupportedCompressionTypeException, UnsupportedForMessageFormatException}
 import org.apache.kafka.common.record._
 import org.apache.kafka.common.utils.Time
 import org.apache.kafka.common.{InvalidRecordException, TopicPartition}
 import org.apache.kafka.test.TestUtils
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
 
 import scala.jdk.CollectionConverters._
 
@@ -89,6 +91,48 @@ class LogValidatorTest {
   def testMisMatchMagic(): Unit = {
     checkMismatchMagic(RecordBatch.MAGIC_VALUE_V0, RecordBatch.MAGIC_VALUE_V1, CompressionType.GZIP)
     checkMismatchMagic(RecordBatch.MAGIC_VALUE_V1, RecordBatch.MAGIC_VALUE_V0, CompressionType.GZIP)
+  }
+
+  @ParameterizedTest
+  @CsvSource(Array("0,gzip", "1,gzip", "0,lz4", "1,lz4", "0,snappy", "1,snappy"))
+  def testInvalidChecksum(code: Byte, compression: String): Unit = {
+    checkInvalidChecksum(code, CompressionCodec.getCompressionCodec(compression), CompressionType.forName(compression))
+  }
+
+  private def checkInvalidChecksum(magic: Byte, compressionCodec: CompressionCodec, compressionType: CompressionType): Unit = {
+    val record: LegacyRecord = LegacyRecord.create(magic, 0L, null, "hello".getBytes)
+    val buf: ByteBuffer = record.buffer
+
+    // enforce modify crc to make checksum error
+    buf.put(LegacyRecord.CRC_OFFSET, 0.toByte)
+
+    val buffer: ByteBuffer = ByteBuffer.allocate(1024)
+    val builder: MemoryRecordsBuilder = MemoryRecords.builder(buffer, magic, compressionType,
+      TimestampType.CREATE_TIME, 0L)
+    builder.appendUncheckedWithOffset(0, record)
+    val memoryRecords: MemoryRecords = builder.build()
+
+    assertThrows(classOf[CorruptRecordException], () =>
+      LogValidator.validateMessagesAndAssignOffsets(
+        memoryRecords,
+        topicPartition,
+        offsetCounter = new LongRef(0L),
+        time = time,
+        now = System.currentTimeMillis(),
+        sourceCodec = compressionCodec,
+        targetCodec = compressionCodec,
+        compactedTopic = false,
+        magic = magic,
+        timestampType = TimestampType.CREATE_TIME,
+        timestampDiffMaxMs = 1000L,
+        partitionLeaderEpoch = RecordBatch.NO_PARTITION_LEADER_EPOCH,
+        origin = AppendOrigin.Client,
+        interBrokerProtocolVersion = KAFKA_2_3_IV1,
+        brokerTopicStats = brokerTopicStats,
+        requestLocal = RequestLocal.withThreadConfinedCaching)
+    )
+    assertEquals(metricsKeySet.count(_.getMBeanName.endsWith(s"${BrokerTopicStats.InvalidMessageCrcRecordsPerSec}")), 1)
+    assertTrue(meterCount(s"${BrokerTopicStats.InvalidMessageCrcRecordsPerSec}") > 0)
   }
 
   private def checkOnlyOneBatch(magic: Byte, sourceCompressionType: CompressionType, targetCompressionType: CompressionType): Unit = {

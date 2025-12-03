@@ -203,6 +203,9 @@ private[log] object LogValidator extends Logging {
       try {
         record.ensureValid()
       } catch {
+        case e: CorruptRecordException =>
+          brokerTopicStats.allTopicsStats.invalidMessageCrcRecordsPerSec.mark()
+          throw e
         case e: InvalidRecordException =>
           brokerTopicStats.allTopicsStats.invalidMessageCrcRecordsPerSec.mark()
           throw new CorruptRecordException(e.getMessage + s" in topic partition $topicPartition.")
